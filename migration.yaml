@@ -27,7 +27,6 @@ steps:
 # =====================================================
 # 1. CHECKOUT
 # =====================================================
-
 - checkout: self
   clean: true
   displayName: 'Checkout Repository'
@@ -36,7 +35,6 @@ steps:
 # =====================================================
 # 2. CHECK REQUIRED TOOLS
 # =====================================================
-
 - script: |
     echo ===== Checking Required Tools =====
     java -version
@@ -51,7 +49,6 @@ steps:
 # =====================================================
 # 3. GITLEAKS SECURITY SCAN
 # =====================================================
-
 - script: |
     echo ===== Gitleaks Security Scan =====
 
@@ -59,55 +56,62 @@ steps:
       --source="$(Build.SourcesDirectory)" ^
       --config="$(Build.SourcesDirectory)\.gitleaks.toml" ^
       --verbose
-
   displayName: 'Security Scan - Gitleaks'
 
 
 # =====================================================
-# 4. BACKEND UNIT TESTS
+# 4. SONARQUBE PREPARE - MAVEN MODE
 # =====================================================
+- task: SonarQubePrepare@7
+  displayName: 'Prepare SonarQube Analysis'
+  inputs:
+    SonarQube: '$(sonarQubeConnection)'
+    scannerMode: 'other'
+    extraProperties: |
+      sonar.projectKey=$(sonarProjectKey)
+      sonar.projectName=$(sonarProjectName)
 
+
+# =====================================================
+# 5. BACKEND TEST + BUILD + SONARQUBE ANALYSIS
+# =====================================================
+- task: Maven@4
+  displayName: 'Test Build and Analyze Backend'
+  inputs:
+    mavenPOMFile: '$(BACKEND_DIR)/pom.xml'
+    goals: 'clean verify'
+    options: '-DskipTests=false'
+    publishJUnitResults: true
+    testResultsFiles: '**/surefire-reports/TEST-*.xml'
+    javaHomeOption: 'Path'
+    jdkDirectory: '$(JAVA_HOME)'
+    mavenVersionOption: 'Default'
+    sonarQubeRunAnalysis: true
+
+
+# =====================================================
+# 6. COPY BACKEND DEPENDENCIES
+# =====================================================
 - script: |
-    echo ===== Running Backend Unit Tests =====
-    mvn test
-  workingDirectory: '$(BACKEND_DIR)'
-  displayName: 'Test Backend'
-
-
-# =====================================================
-# 5. BUILD BACKEND
-# =====================================================
-
-- script: |
-    echo ===== Building Spring Boot Backend =====
-
-    mvn clean package -DskipTests
-
     echo ===== Copying Maven Dependencies =====
 
     mvn dependency:copy-dependencies ^
       -DoutputDirectory=target/dependency
-
   workingDirectory: '$(BACKEND_DIR)'
-  displayName: 'Build Backend'
+  displayName: 'Copy Backend Dependencies'
 
 
 # =====================================================
-# 6. VERIFY JAVA BUILD OUTPUT
+# 7. VERIFY JAVA OUTPUT
 # =====================================================
-
 - powershell: |
     Write-Host "===== Verifying Compiled Java Classes ====="
 
     $classesPath = "$(Build.SourcesDirectory)\backend\target\classes"
-    $dependencyPath = "$(Build.SourcesDirectory)\backend\target\dependency"
-
-    Write-Host "Classes path: $classesPath"
-    Write-Host "Dependencies path: $dependencyPath"
 
     if (!(Test-Path $classesPath)) {
-        Write-Error "Compiled classes directory does not exist: $classesPath"
-        exit 1
+      Write-Error "Compiled classes directory not found: $classesPath"
+      exit 1
     }
 
     $classFiles = Get-ChildItem `
@@ -117,37 +121,17 @@ steps:
       -ErrorAction SilentlyContinue
 
     if ($classFiles.Count -eq 0) {
-        Write-Error "No .class files were found under $classesPath"
-        exit 1
+      Write-Error "No compiled .class files found."
+      exit 1
     }
 
-    Write-Host "Found $($classFiles.Count) compiled .class files."
-
-    $classFiles |
-      Select-Object -First 20 |
-      ForEach-Object {
-        Write-Host $_.FullName
-      }
-
-    if (Test-Path $dependencyPath) {
-        $jars = Get-ChildItem `
-          -Path $dependencyPath `
-          -Filter *.jar `
-          -ErrorAction SilentlyContinue
-
-        Write-Host "Found $($jars.Count) dependency JAR files."
-    }
-    else {
-        Write-Warning "Dependency directory not found."
-    }
-
+    Write-Host "Compiled Java classes found: $($classFiles.Count)"
   displayName: 'Verify Java Build Output'
 
 
 # =====================================================
-# 7. BUILD FRONTEND
+# 8. BUILD FRONTEND
 # =====================================================
-
 - script: |
     echo ===== Building React Frontend =====
     call npm install
@@ -157,36 +141,8 @@ steps:
 
 
 # =====================================================
-# 8. SONARQUBE PREPARE
+# 9. SONARQUBE QUALITY GATE
 # =====================================================
-
-- task: SonarQubePrepare@7
-  displayName: 'Prepare SonarQube Analysis'
-  inputs:
-    SonarQube: '$(sonarQubeConnection)'
-    scannerMode: 'cli'
-    configMode: 'manual'
-    cliProjectKey: '$(sonarProjectKey)'
-    cliProjectName: '$(sonarProjectName)'
-    cliSources: '.'
-    extraProperties: |
-      sonar.sources=backend/src,frontend/src
-      sonar.java.binaries=$(Build.SourcesDirectory)/backend/target/classes
-      sonar.java.libraries=$(Build.SourcesDirectory)/backend/target/dependency/*.jar
-
-
-# =====================================================
-# 9. SONARQUBE ANALYSIS
-# =====================================================
-
-- task: SonarQubeAnalyze@7
-  displayName: 'Run SonarQube Analysis'
-
-
-# =====================================================
-# 10. SONARQUBE QUALITY GATE
-# =====================================================
-
 - task: SonarQubePublish@7
   displayName: 'Publish SonarQube Quality Gate'
   inputs:
@@ -194,9 +150,8 @@ steps:
 
 
 # =====================================================
-# 11. PREPARE BUILD ARTIFACT
+# 10. PREPARE BUILD ARTIFACT
 # =====================================================
-
 - task: CopyFiles@2
   displayName: 'Prepare Build Artifact'
   inputs:
@@ -209,9 +164,8 @@ steps:
 
 
 # =====================================================
-# 12. PUBLISH PIPELINE ARTIFACT
+# 11. PUBLISH PIPELINE ARTIFACT
 # =====================================================
-
 - task: PublishPipelineArtifact@1
   displayName: 'Publish Build Artifact'
   inputs:
@@ -221,9 +175,8 @@ steps:
 
 
 # =====================================================
-# 13. UPLOAD ARTIFACT TO AZURE STORAGE
+# 12. UPLOAD ARTIFACT TO AZURE STORAGE
 # =====================================================
-
 - task: AzureCLI@2
   displayName: 'Upload Artifact to Azure Storage'
   inputs:
@@ -242,9 +195,8 @@ steps:
 
 
 # =====================================================
-# 14. VERIFY AZURE STORAGE
+# 13. VERIFY AZURE STORAGE
 # =====================================================
-
 - task: AzureCLI@2
   displayName: 'Verify Azure Storage Upload'
   inputs:
@@ -262,9 +214,8 @@ steps:
 
 
 # =====================================================
-# 15. SUCCESS
+# 14. SUCCESS
 # =====================================================
-
 - script: |
     echo ==========================================
     echo Pipeline Completed Successfully
