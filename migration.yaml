@@ -2,6 +2,8 @@ trigger: none
 
 pool:
   name: 'Batch13pool'
+  demands:
+  - Agent.Name -equals akagent2
 
 variables:
   # Azure
@@ -14,7 +16,7 @@ variables:
   sonarProjectKey: 'Akshata-sq'
   sonarProjectName: 'Akshata-sq'
 
-  # Project directories
+  # Repository directories
   BACKEND_DIR: 'backend'
   FRONTEND_DIR: 'frontend'
   ELECTRON_DIR: 'electron'
@@ -22,19 +24,21 @@ variables:
 
 steps:
 
-# ==========================================
+# =====================================================
 # 1. CHECKOUT
-# ==========================================
+# =====================================================
 - checkout: self
+  clean: true
   displayName: 'Checkout Repository'
 
 
-# ==========================================
+# =====================================================
 # 2. CHECK REQUIRED TOOLS
-# ==========================================
+# =====================================================
 - script: |
     echo ===== Checking Required Tools =====
     java -version
+    mvn -version
     node --version
     npm --version
     git --version
@@ -42,78 +46,118 @@ steps:
   displayName: 'Check Required Tools'
 
 
-# ==========================================
+# =====================================================
 # 3. GITLEAKS SECURITY SCAN
-# ==========================================
+# No .gitleaks.toml required
+# =====================================================
 - script: |
     echo ===== Gitleaks Security Scan =====
-    C:\gitleaks\gitleaks.exe detect --source="$(Build.SourcesDirectory)" --verbose
+
+    C:\gitleaks\gitleaks.exe detect ^
+      --source="$(Build.SourcesDirectory)" ^
+      --verbose
+
   displayName: 'Security Scan - Gitleaks'
 
 
-# ==========================================
-# 4. SONARQUBE PREPARE
-# ==========================================
+# =====================================================
+# 4. PREPARE SONARQUBE - MAVEN MODE
+# =====================================================
 - task: SonarQubePrepare@7
   displayName: 'Prepare SonarQube Analysis'
   inputs:
     SonarQube: '$(sonarQubeConnection)'
-    scannerMode: 'cli'
-    configMode: 'manual'
-    cliProjectKey: '$(sonarProjectKey)'
-    cliProjectName: '$(sonarProjectName)'
-    cliSources: '.'
+    scannerMode: 'other'
+    extraProperties: |
+      sonar.projectKey=$(sonarProjectKey)
+      sonar.projectName=$(sonarProjectName)
 
 
-# ==========================================
-# 5. BACKEND
-# ==========================================
+# =====================================================
+# 5. TEST + BUILD + SONARQUBE ANALYSIS
+# Maven compiles Java BEFORE Sonar analysis
+# =====================================================
+- task: Maven@4
+  displayName: 'Test Build and Analyze Backend'
+  inputs:
+    mavenPOMFile: '$(BACKEND_DIR)/pom.xml'
+    goals: 'clean verify'
+    options: '-DskipTests=false'
+    publishJUnitResults: true
+    testResultsFiles: '**/surefire-reports/TEST-*.xml'
+    javaHomeOption: 'Path'
+    jdkDirectory: '$(JAVA_HOME)'
+    mavenVersionOption: 'Default'
+    sonarQubeRunAnalysis: true
+
+
+# =====================================================
+# 6. VERIFY COMPILED JAVA CLASSES
+# =====================================================
+- powershell: |
+    Write-Host "===== Verifying Java Build Output ====="
+
+    $classesPath = "$(Build.SourcesDirectory)\backend\target\classes"
+
+    if (!(Test-Path $classesPath)) {
+        Write-Error "Compiled classes directory does not exist: $classesPath"
+        exit 1
+    }
+
+    $classFiles = Get-ChildItem `
+      -Path $classesPath `
+      -Filter *.class `
+      -Recurse `
+      -ErrorAction SilentlyContinue
+
+    if ($classFiles.Count -eq 0) {
+        Write-Error "No compiled Java .class files found."
+        exit 1
+    }
+
+    Write-Host "SUCCESS: Found $($classFiles.Count) compiled Java classes."
+
+  displayName: 'Verify Java Build Output'
+
+
+# =====================================================
+# 7. COPY MAVEN DEPENDENCIES
+# =====================================================
 - script: |
-    echo ===== Backend =====
-    cd "$(Build.SourcesDirectory)\$(BACKEND_DIR)"
-    if exist pom.xml (
-      echo Maven backend detected
-      mvn clean package
-    ) else (
-      echo No pom.xml found - skipping Maven build
-    )
-  displayName: 'Build Backend'
+    echo ===== Copying Maven Dependencies =====
+
+    mvn dependency:copy-dependencies ^
+      -DoutputDirectory=target/dependency
+
+  workingDirectory: '$(BACKEND_DIR)'
+  displayName: 'Copy Backend Dependencies'
 
 
-# ==========================================
-# 6. FRONTEND
-# ==========================================
+# =====================================================
+# 8. BUILD FRONTEND
+# =====================================================
 - script: |
-    echo ===== Frontend =====
-    cd "$(Build.SourcesDirectory)\$(FRONTEND_DIR)"
-    if exist package.json (
-      call npm install
-      call npm run build
-    ) else (
-      echo No package.json found - skipping frontend build
-    )
+    echo ===== Building React Frontend =====
+
+    call npm install
+    call npm run build
+
+  workingDirectory: '$(FRONTEND_DIR)'
   displayName: 'Build Frontend'
 
 
-# ==========================================
-# 7. SONARQUBE ANALYSIS
-# ==========================================
-- task: SonarQubeAnalyze@7
-  displayName: 'Run SonarQube Analysis'
-
-
-# ==========================================
-# 8. SONARQUBE QUALITY GATE
-# ==========================================
+# =====================================================
+# 9. PUBLISH SONARQUBE QUALITY GATE
+# =====================================================
 - task: SonarQubePublish@7
   displayName: 'Publish SonarQube Quality Gate'
   inputs:
-    pollingTimeoutSec: '300'
+    pollingTimeoutSec: '600'
 
 
-# ==========================================
-# 9. COPY FILES FOR ARTIFACT
-# ==========================================
+# =====================================================
+# 10. PREPARE BUILD ARTIFACT
+# =====================================================
 - task: CopyFiles@2
   displayName: 'Prepare Build Artifact'
   inputs:
@@ -125,19 +169,20 @@ steps:
     TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
 
-# ==========================================
-# 10. PUBLISH PIPELINE ARTIFACT
-# ==========================================
+# =====================================================
+# 11. PUBLISH PIPELINE ARTIFACT
+# =====================================================
 - task: PublishPipelineArtifact@1
   displayName: 'Publish Build Artifact'
   inputs:
     targetPath: '$(Build.ArtifactStagingDirectory)'
     artifact: 'drop'
+    publishLocation: 'pipeline'
 
 
-# ==========================================
-# 11. UPLOAD ARTIFACT TO AZURE STORAGE
-# ==========================================
+# =====================================================
+# 12. UPLOAD ARTIFACT TO AZURE STORAGE
+# =====================================================
 - task: AzureCLI@2
   displayName: 'Upload Artifact to Azure Storage'
   inputs:
@@ -145,10 +190,41 @@ steps:
     scriptType: 'batch'
     scriptLocation: 'inlineScript'
     inlineScript: |
-      echo ===== Uploading files to Azure Storage =====
+      echo ===== Uploading Artifact to Azure Storage =====
+
       az storage blob upload-batch ^
         --account-name "$(storageAccount)" ^
         --destination "$(storageContainer)" ^
         --source "$(Build.ArtifactStagingDirectory)" ^
         --auth-mode login ^
         --overwrite
+
+
+# =====================================================
+# 13. VERIFY AZURE STORAGE
+# =====================================================
+- task: AzureCLI@2
+  displayName: 'Verify Azure Storage Upload'
+  inputs:
+    azureSubscription: '$(azureServiceConnection)'
+    scriptType: 'batch'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      echo ===== Verifying Azure Blob Storage =====
+
+      az storage blob list ^
+        --account-name "$(storageAccount)" ^
+        --container-name "$(storageContainer)" ^
+        --auth-mode login ^
+        --output table
+
+
+# =====================================================
+# 14. PIPELINE SUCCESS
+# =====================================================
+- script: |
+    echo ==========================================
+    echo Pipeline Completed Successfully
+    echo ==========================================
+  displayName: 'Pipeline Success'
+  condition: succeeded()
