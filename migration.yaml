@@ -16,7 +16,7 @@ variables:
   sonarProjectKey: 'Akshata-sq'
   sonarProjectName: 'Akshata-sq'
 
-  # Project folders
+  # Repository directories
   BACKEND_DIR: 'backend'
   FRONTEND_DIR: 'frontend'
   ELECTRON_DIR: 'electron'
@@ -39,14 +39,12 @@ steps:
 
 - script: |
     echo ===== Checking Required Tools =====
-
     java -version
     mvn -version
     node --version
     npm --version
     git --version
     C:\gitleaks\gitleaks.exe version
-
   displayName: 'Check Required Tools'
 
 
@@ -66,7 +64,100 @@ steps:
 
 
 # =====================================================
-# 4. SONARQUBE PREPARE
+# 4. BACKEND UNIT TESTS
+# =====================================================
+
+- script: |
+    echo ===== Running Backend Unit Tests =====
+    mvn test
+  workingDirectory: '$(BACKEND_DIR)'
+  displayName: 'Test Backend'
+
+
+# =====================================================
+# 5. BUILD BACKEND
+# =====================================================
+
+- script: |
+    echo ===== Building Spring Boot Backend =====
+
+    mvn clean package -DskipTests
+
+    echo ===== Copying Maven Dependencies =====
+
+    mvn dependency:copy-dependencies ^
+      -DoutputDirectory=target/dependency
+
+  workingDirectory: '$(BACKEND_DIR)'
+  displayName: 'Build Backend'
+
+
+# =====================================================
+# 6. VERIFY JAVA BUILD OUTPUT
+# =====================================================
+
+- powershell: |
+    Write-Host "===== Verifying Compiled Java Classes ====="
+
+    $classesPath = "$(Build.SourcesDirectory)\backend\target\classes"
+    $dependencyPath = "$(Build.SourcesDirectory)\backend\target\dependency"
+
+    Write-Host "Classes path: $classesPath"
+    Write-Host "Dependencies path: $dependencyPath"
+
+    if (!(Test-Path $classesPath)) {
+        Write-Error "Compiled classes directory does not exist: $classesPath"
+        exit 1
+    }
+
+    $classFiles = Get-ChildItem `
+      -Path $classesPath `
+      -Filter *.class `
+      -Recurse `
+      -ErrorAction SilentlyContinue
+
+    if ($classFiles.Count -eq 0) {
+        Write-Error "No .class files were found under $classesPath"
+        exit 1
+    }
+
+    Write-Host "Found $($classFiles.Count) compiled .class files."
+
+    $classFiles |
+      Select-Object -First 20 |
+      ForEach-Object {
+        Write-Host $_.FullName
+      }
+
+    if (Test-Path $dependencyPath) {
+        $jars = Get-ChildItem `
+          -Path $dependencyPath `
+          -Filter *.jar `
+          -ErrorAction SilentlyContinue
+
+        Write-Host "Found $($jars.Count) dependency JAR files."
+    }
+    else {
+        Write-Warning "Dependency directory not found."
+    }
+
+  displayName: 'Verify Java Build Output'
+
+
+# =====================================================
+# 7. BUILD FRONTEND
+# =====================================================
+
+- script: |
+    echo ===== Building React Frontend =====
+    call npm install
+    call npm run build
+  workingDirectory: '$(FRONTEND_DIR)'
+  displayName: 'Build Frontend'
+
+
+# =====================================================
+# 8. SONARQUBE PREPARE
 # =====================================================
 
 - task: SonarQubePrepare@7
@@ -80,54 +171,12 @@ steps:
     cliSources: '.'
     extraProperties: |
       sonar.sources=backend/src,frontend/src
-      sonar.java.binaries=backend/target/classes
+      sonar.java.binaries=$(Build.SourcesDirectory)/backend/target/classes
+      sonar.java.libraries=$(Build.SourcesDirectory)/backend/target/dependency/*.jar
 
 
 # =====================================================
-# 5. BACKEND UNIT TESTS
-# =====================================================
-
-- script: |
-    echo ===== Running Backend Unit Tests =====
-
-    mvn test
-
-  workingDirectory: '$(BACKEND_DIR)'
-  displayName: 'Test Backend'
-
-
-# =====================================================
-# 6. BUILD BACKEND
-# =====================================================
-
-- script: |
-    echo ===== Building Backend =====
-
-    mvn clean package -DskipTests
-
-    mvn dependency:copy-dependencies ^
-      -DoutputDirectory=target/dependency
-
-  workingDirectory: '$(BACKEND_DIR)'
-  displayName: 'Build Backend'
-
-
-# =====================================================
-# 7. BUILD FRONTEND
-# =====================================================
-
-- script: |
-    echo ===== Building Frontend =====
-
-    call npm install
-    call npm run build
-
-  workingDirectory: '$(FRONTEND_DIR)'
-  displayName: 'Build Frontend'
-
-
-# =====================================================
-# 8. SONARQUBE ANALYSIS
+# 9. SONARQUBE ANALYSIS
 # =====================================================
 
 - task: SonarQubeAnalyze@7
@@ -135,7 +184,7 @@ steps:
 
 
 # =====================================================
-# 9. QUALITY GATE
+# 10. SONARQUBE QUALITY GATE
 # =====================================================
 
 - task: SonarQubePublish@7
@@ -145,7 +194,7 @@ steps:
 
 
 # =====================================================
-# 10. COPY FILES FOR ARTIFACT
+# 11. PREPARE BUILD ARTIFACT
 # =====================================================
 
 - task: CopyFiles@2
@@ -160,7 +209,7 @@ steps:
 
 
 # =====================================================
-# 11. PUBLISH PIPELINE ARTIFACT
+# 12. PUBLISH PIPELINE ARTIFACT
 # =====================================================
 
 - task: PublishPipelineArtifact@1
@@ -172,7 +221,7 @@ steps:
 
 
 # =====================================================
-# 12. UPLOAD ARTIFACT TO AZURE STORAGE
+# 13. UPLOAD ARTIFACT TO AZURE STORAGE
 # =====================================================
 
 - task: AzureCLI@2
@@ -193,7 +242,7 @@ steps:
 
 
 # =====================================================
-# 13. VERIFY AZURE STORAGE UPLOAD
+# 14. VERIFY AZURE STORAGE
 # =====================================================
 
 - task: AzureCLI@2
@@ -203,7 +252,7 @@ steps:
     scriptType: 'batch'
     scriptLocation: 'inlineScript'
     inlineScript: |
-      echo ===== Verifying Uploaded Blobs =====
+      echo ===== Verifying Azure Blob Storage =====
 
       az storage blob list ^
         --account-name "$(storageAccount)" ^
@@ -213,13 +262,12 @@ steps:
 
 
 # =====================================================
-# 14. SUCCESS MESSAGE
+# 15. SUCCESS
 # =====================================================
 
 - script: |
-    echo =======================================
-    echo Migration Pipeline Completed Successfully
-    echo =======================================
-
+    echo ==========================================
+    echo Pipeline Completed Successfully
+    echo ==========================================
   displayName: 'Pipeline Success'
   condition: succeeded()
