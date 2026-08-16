@@ -1,0 +1,5 @@
+[allowlist]
+description = "Ignore known non-secret application storage key"
+regexes = [
+  '''naukri\.jobs\.v1'''
+]
