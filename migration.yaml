@@ -1,0 +1,154 @@
+trigger: none
+
+pool:
+  name: 'Batch13pool'
+
+variables:
+  # Azure
+  azureServiceConnection: 'batch13-serviceconnection'
+  storageAccount: 'akstgacc'
+  storageContainer: 'adocont'
+
+  # SonarQube
+  sonarQubeConnection: 'Sonarqubeconnection-ado-new'
+  sonarProjectKey: 'Akshata-sq'
+  sonarProjectName: 'Akshata-sq'
+
+  # Project directories
+  BACKEND_DIR: 'backend'
+  FRONTEND_DIR: 'frontend'
+  ELECTRON_DIR: 'electron'
+  TERRAFORM_DIR: 'Terraform'
+
+steps:
+
+# ==========================================
+# 1. CHECKOUT
+# ==========================================
+- checkout: self
+  displayName: 'Checkout Repository'
+
+
+# ==========================================
+# 2. CHECK REQUIRED TOOLS
+# ==========================================
+- script: |
+    echo ===== Checking Required Tools =====
+    java -version
+    node --version
+    npm --version
+    git --version
+    C:\gitleaks\gitleaks.exe version
+  displayName: 'Check Required Tools'
+
+
+# ==========================================
+# 3. GITLEAKS SECURITY SCAN
+# ==========================================
+- script: |
+    echo ===== Gitleaks Security Scan =====
+    C:\gitleaks\gitleaks.exe detect --source="$(Build.SourcesDirectory)" --verbose
+  displayName: 'Security Scan - Gitleaks'
+
+
+# ==========================================
+# 4. SONARQUBE PREPARE
+# ==========================================
+- task: SonarQubePrepare@7
+  displayName: 'Prepare SonarQube Analysis'
+  inputs:
+    SonarQube: '$(sonarQubeConnection)'
+    scannerMode: 'cli'
+    configMode: 'manual'
+    cliProjectKey: '$(sonarProjectKey)'
+    cliProjectName: '$(sonarProjectName)'
+    cliSources: '.'
+
+
+# ==========================================
+# 5. BACKEND
+# ==========================================
+- script: |
+    echo ===== Backend =====
+    cd "$(Build.SourcesDirectory)\$(BACKEND_DIR)"
+    if exist pom.xml (
+      echo Maven backend detected
+      mvn clean package
+    ) else (
+      echo No pom.xml found - skipping Maven build
+    )
+  displayName: 'Build Backend'
+
+
+# ==========================================
+# 6. FRONTEND
+# ==========================================
+- script: |
+    echo ===== Frontend =====
+    cd "$(Build.SourcesDirectory)\$(FRONTEND_DIR)"
+    if exist package.json (
+      call npm install
+      call npm run build
+    ) else (
+      echo No package.json found - skipping frontend build
+    )
+  displayName: 'Build Frontend'
+
+
+# ==========================================
+# 7. SONARQUBE ANALYSIS
+# ==========================================
+- task: SonarQubeAnalyze@7
+  displayName: 'Run SonarQube Analysis'
+
+
+# ==========================================
+# 8. SONARQUBE QUALITY GATE
+# ==========================================
+- task: SonarQubePublish@7
+  displayName: 'Publish SonarQube Quality Gate'
+  inputs:
+    pollingTimeoutSec: '300'
+
+
+# ==========================================
+# 9. COPY FILES FOR ARTIFACT
+# ==========================================
+- task: CopyFiles@2
+  displayName: 'Prepare Build Artifact'
+  inputs:
+    SourceFolder: '$(Build.SourcesDirectory)'
+    Contents: |
+      **/*
+      !**/.git/**
+      !**/node_modules/**
+    TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+
+# ==========================================
+# 10. PUBLISH PIPELINE ARTIFACT
+# ==========================================
+- task: PublishPipelineArtifact@1
+  displayName: 'Publish Build Artifact'
+  inputs:
+    targetPath: '$(Build.ArtifactStagingDirectory)'
+    artifact: 'drop'
+
+
+# ==========================================
+# 11. UPLOAD ARTIFACT TO AZURE STORAGE
+# ==========================================
+- task: AzureCLI@2
+  displayName: 'Upload Artifact to Azure Storage'
+  inputs:
+    azureSubscription: '$(azureServiceConnection)'
+    scriptType: 'batch'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      echo ===== Uploading files to Azure Storage =====
+      az storage blob upload-batch ^
+        --account-name "$(storageAccount)" ^
+        --destination "$(storageContainer)" ^
+        --source "$(Build.ArtifactStagingDirectory)" ^
+        --auth-mode login ^
+        --overwrite
