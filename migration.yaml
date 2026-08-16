@@ -1,0 +1,42 @@
+trigger: none
+
+pool:
+  name: 'Batch13pool'
+
+steps:
+- checkout: self
+  displayName: 'Checkout Repository'
+
+- script: |
+    echo ===== Checking Tools =====
+    java -version
+    mvn -version
+    node --version
+    npm --version
+    gitleaks version
+  displayName: 'Check Required Tools'
+
+- script: |
+    echo ===== Security Scan =====
+    gitleaks detect --source="." --verbose
+  displayName: 'Security Scan - Gitleaks'
+
+- script: |
+    echo ===== Running Backend Tests =====
+    mvn test
+  workingDirectory: 'backend'
+  displayName: 'Test Backend'
+
+- script: |
+    echo ===== Building Backend =====
+    mvn clean package -DskipTests
+    mvn dependency:copy-dependencies -DoutputDirectory=target/dependency
+  workingDirectory: 'backend'
+  displayName: 'Build Backend'
+
+- script: |
+    echo ===== Building Frontend =====
+    npm install
+    npm run build
+  workingDirectory: 'frontend'
+  displayName: 'Build Frontend'
