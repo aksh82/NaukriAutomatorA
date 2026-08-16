@@ -2,6 +2,8 @@ trigger: none
 
 pool:
   name: 'Batch13pool'
+  demands:
+  - Agent.Name -equals akagent2
 
 variables:
   # Azure
@@ -14,7 +16,7 @@ variables:
   sonarProjectKey: 'Akshata-sq'
   sonarProjectName: 'Akshata-sq'
 
-  # Project directories
+  # Project folders
   BACKEND_DIR: 'backend'
   FRONTEND_DIR: 'frontend'
   ELECTRON_DIR: 'electron'
@@ -22,38 +24,51 @@ variables:
 
 steps:
 
-# ==========================================
+# =====================================================
 # 1. CHECKOUT
-# ==========================================
+# =====================================================
+
 - checkout: self
+  clean: true
   displayName: 'Checkout Repository'
 
 
-# ==========================================
+# =====================================================
 # 2. CHECK REQUIRED TOOLS
-# ==========================================
+# =====================================================
+
 - script: |
     echo ===== Checking Required Tools =====
+
     java -version
+    mvn -version
     node --version
     npm --version
     git --version
     C:\gitleaks\gitleaks.exe version
+
   displayName: 'Check Required Tools'
 
 
-# ==========================================
+# =====================================================
 # 3. GITLEAKS SECURITY SCAN
-# ==========================================
+# =====================================================
+
 - script: |
     echo ===== Gitleaks Security Scan =====
-    C:\gitleaks\gitleaks.exe detect --source="$(Build.SourcesDirectory)" --verbose
+
+    C:\gitleaks\gitleaks.exe detect ^
+      --source="$(Build.SourcesDirectory)" ^
+      --config="$(Build.SourcesDirectory)\.gitleaks.toml" ^
+      --verbose
+
   displayName: 'Security Scan - Gitleaks'
 
 
-# ==========================================
+# =====================================================
 # 4. SONARQUBE PREPARE
-# ==========================================
+# =====================================================
+
 - task: SonarQubePrepare@7
   displayName: 'Prepare SonarQube Analysis'
   inputs:
@@ -63,57 +78,76 @@ steps:
     cliProjectKey: '$(sonarProjectKey)'
     cliProjectName: '$(sonarProjectName)'
     cliSources: '.'
+    extraProperties: |
+      sonar.sources=backend/src,frontend/src
+      sonar.java.binaries=backend/target/classes
 
 
-# ==========================================
-# 5. BACKEND
-# ==========================================
+# =====================================================
+# 5. BACKEND UNIT TESTS
+# =====================================================
+
 - script: |
-    echo ===== Backend =====
-    cd "$(Build.SourcesDirectory)\$(BACKEND_DIR)"
-    if exist pom.xml (
-      echo Maven backend detected
-      mvn clean package
-    ) else (
-      echo No pom.xml found - skipping Maven build
-    )
+    echo ===== Running Backend Unit Tests =====
+
+    mvn test
+
+  workingDirectory: '$(BACKEND_DIR)'
+  displayName: 'Test Backend'
+
+
+# =====================================================
+# 6. BUILD BACKEND
+# =====================================================
+
+- script: |
+    echo ===== Building Backend =====
+
+    mvn clean package -DskipTests
+
+    mvn dependency:copy-dependencies ^
+      -DoutputDirectory=target/dependency
+
+  workingDirectory: '$(BACKEND_DIR)'
   displayName: 'Build Backend'
 
 
-# ==========================================
-# 6. FRONTEND
-# ==========================================
+# =====================================================
+# 7. BUILD FRONTEND
+# =====================================================
+
 - script: |
-    echo ===== Frontend =====
-    cd "$(Build.SourcesDirectory)\$(FRONTEND_DIR)"
-    if exist package.json (
-      call npm install
-      call npm run build
-    ) else (
-      echo No package.json found - skipping frontend build
-    )
+    echo ===== Building Frontend =====
+
+    call npm install
+    call npm run build
+
+  workingDirectory: '$(FRONTEND_DIR)'
   displayName: 'Build Frontend'
 
 
-# ==========================================
-# 7. SONARQUBE ANALYSIS
-# ==========================================
+# =====================================================
+# 8. SONARQUBE ANALYSIS
+# =====================================================
+
 - task: SonarQubeAnalyze@7
   displayName: 'Run SonarQube Analysis'
 
 
-# ==========================================
-# 8. SONARQUBE QUALITY GATE
-# ==========================================
+# =====================================================
+# 9. QUALITY GATE
+# =====================================================
+
 - task: SonarQubePublish@7
   displayName: 'Publish SonarQube Quality Gate'
   inputs:
-    pollingTimeoutSec: '300'
+    pollingTimeoutSec: '600'
 
 
-# ==========================================
-# 9. COPY FILES FOR ARTIFACT
-# ==========================================
+# =====================================================
+# 10. COPY FILES FOR ARTIFACT
+# =====================================================
+
 - task: CopyFiles@2
   displayName: 'Prepare Build Artifact'
   inputs:
@@ -125,19 +159,22 @@ steps:
     TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
 
-# ==========================================
-# 10. PUBLISH PIPELINE ARTIFACT
-# ==========================================
+# =====================================================
+# 11. PUBLISH PIPELINE ARTIFACT
+# =====================================================
+
 - task: PublishPipelineArtifact@1
   displayName: 'Publish Build Artifact'
   inputs:
     targetPath: '$(Build.ArtifactStagingDirectory)'
     artifact: 'drop'
+    publishLocation: 'pipeline'
 
 
-# ==========================================
-# 11. UPLOAD ARTIFACT TO AZURE STORAGE
-# ==========================================
+# =====================================================
+# 12. UPLOAD ARTIFACT TO AZURE STORAGE
+# =====================================================
+
 - task: AzureCLI@2
   displayName: 'Upload Artifact to Azure Storage'
   inputs:
@@ -145,10 +182,44 @@ steps:
     scriptType: 'batch'
     scriptLocation: 'inlineScript'
     inlineScript: |
-      echo ===== Uploading files to Azure Storage =====
+      echo ===== Uploading Artifact to Azure Storage =====
+
       az storage blob upload-batch ^
         --account-name "$(storageAccount)" ^
         --destination "$(storageContainer)" ^
         --source "$(Build.ArtifactStagingDirectory)" ^
         --auth-mode login ^
         --overwrite
+
+
+# =====================================================
+# 13. VERIFY AZURE STORAGE UPLOAD
+# =====================================================
+
+- task: AzureCLI@2
+  displayName: 'Verify Azure Storage Upload'
+  inputs:
+    azureSubscription: '$(azureServiceConnection)'
+    scriptType: 'batch'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      echo ===== Verifying Uploaded Blobs =====
+
+      az storage blob list ^
+        --account-name "$(storageAccount)" ^
+        --container-name "$(storageContainer)" ^
+        --auth-mode login ^
+        --output table
+
+
+# =====================================================
+# 14. SUCCESS MESSAGE
+# =====================================================
+
+- script: |
+    echo =======================================
+    echo Migration Pipeline Completed Successfully
+    echo =======================================
+
+  displayName: 'Pipeline Success'
+  condition: succeeded()
