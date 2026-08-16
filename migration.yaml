@@ -56,6 +56,7 @@ steps:
       --source="$(Build.SourcesDirectory)" ^
       --config="$(Build.SourcesDirectory)\.gitleaks.toml" ^
       --verbose
+
   displayName: 'Security Scan - Gitleaks'
 
 
@@ -73,7 +74,7 @@ steps:
 
 
 # =====================================================
-# 5. BACKEND TEST + BUILD + SONARQUBE ANALYSIS
+# 5. TEST + BUILD + SONARQUBE ANALYSIS
 # =====================================================
 - task: Maven@4
   displayName: 'Test Build and Analyze Backend'
@@ -90,28 +91,16 @@ steps:
 
 
 # =====================================================
-# 6. COPY BACKEND DEPENDENCIES
-# =====================================================
-- script: |
-    echo ===== Copying Maven Dependencies =====
-
-    mvn dependency:copy-dependencies ^
-      -DoutputDirectory=target/dependency
-  workingDirectory: '$(BACKEND_DIR)'
-  displayName: 'Copy Backend Dependencies'
-
-
-# =====================================================
-# 7. VERIFY JAVA OUTPUT
+# 6. VERIFY JAVA BUILD
 # =====================================================
 - powershell: |
-    Write-Host "===== Verifying Compiled Java Classes ====="
+    Write-Host "===== Verifying Java Build ====="
 
     $classesPath = "$(Build.SourcesDirectory)\backend\target\classes"
 
     if (!(Test-Path $classesPath)) {
-      Write-Error "Compiled classes directory not found: $classesPath"
-      exit 1
+        Write-Error "Compiled classes directory not found: $classesPath"
+        exit 1
     }
 
     $classFiles = Get-ChildItem `
@@ -121,12 +110,26 @@ steps:
       -ErrorAction SilentlyContinue
 
     if ($classFiles.Count -eq 0) {
-      Write-Error "No compiled .class files found."
-      exit 1
+        Write-Error "No compiled Java .class files found."
+        exit 1
     }
 
-    Write-Host "Compiled Java classes found: $($classFiles.Count)"
+    Write-Host "SUCCESS: Found $($classFiles.Count) compiled Java classes."
+
   displayName: 'Verify Java Build Output'
+
+
+# =====================================================
+# 7. COPY BACKEND DEPENDENCIES
+# =====================================================
+- script: |
+    echo ===== Copying Maven Dependencies =====
+
+    mvn dependency:copy-dependencies ^
+      -DoutputDirectory=target/dependency
+
+  workingDirectory: '$(BACKEND_DIR)'
+  displayName: 'Copy Backend Dependencies'
 
 
 # =====================================================
@@ -134,8 +137,10 @@ steps:
 # =====================================================
 - script: |
     echo ===== Building React Frontend =====
+
     call npm install
     call npm run build
+
   workingDirectory: '$(FRONTEND_DIR)'
   displayName: 'Build Frontend'
 
